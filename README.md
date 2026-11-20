@@ -30,7 +30,7 @@ Trial and license entitlements are verified by API routes, and the free-scan end
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `GROQ_API_KEY` | For AI analysis | — | Secret Groq API key. Keep it server-side; never use a `NEXT_PUBLIC_` prefix. |
-| `GROQ_MODEL` | No | `llama-3.3-70b-versatile` | Groq model that supports structured JSON output. |
+| `GROQ_MODEL` | No | `openai/gpt-oss-20b` | Groq model with strict JSON Schema support. |
 | `SCAMSHIELD_TRIAL_SECRET` | Production | Development-only local secret | Random secret used to sign trial, license, and usage cookies. Generate one with `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`. |
 | `SCAMSHIELD_PRO_LICENSE_KEYS` | For paid manual activation | — | Comma-separated issued license keys. Store only in server environment settings. |
 | `NEXT_PUBLIC_CHECKOUT_URL` | For card/global checkout | — | HTTPS checkout URL for your payment provider. |
@@ -45,6 +45,7 @@ Trial and license entitlements are verified by API routes, and the free-scan end
 - RDAP lookups go through the fixed `rdap.org` endpoint. Domain registration records and name-server data can be incomplete or unavailable.
 - Text submitted for AI analysis and extracted URL signals are sent from the server route to Groq. Avoid pasting passwords, PINs, verification codes, or private information.
 - AI output and heuristic signals are informational, can be wrong, and are not a safety guarantee.
+- When Groq returns an error, the API keeps a generic message for visitors and writes the upstream HTTP status, model, and a bounded, redacted response body to the server logs. Check the local dev terminal or Vercel function logs; never log or share the API key.
 
 ## GitHub and Vercel
 

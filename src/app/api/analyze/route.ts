@@ -3,6 +3,13 @@ import { hasProAccess } from "@/lib/entitlements";
 
 const MAX_TEXT_LENGTH = 16_000;
 const MAX_SIGNALS = 20;
+const DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b";
+const STRICT_JSON_SCHEMA_MODELS = new Set([
+  "openai/gpt-oss-20b",
+  "openai/gpt-oss-120b",
+  "qwen/qwen3.8-27b",
+  "meta-models/muse-spark-open",
+]);
 const ANALYSIS_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -53,6 +60,30 @@ type Analysis = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function redactProviderDetails(value: string, apiKey: string): string {
+  return value
+    .slice(0, 2_000)
+    .split(apiKey)
+    .join("[redacted]")
+    .replace(/gsk_[A-Za-z0-9_-]+/g, "[redacted]");
+}
+
+function getGroqErrorMessage(status: number): string {
+  if (status === 400) {
+    return "Groq rejected the model or request format. Check GROQ_MODEL and its structured-output support.";
+  }
+  if (status === 401) {
+    return "Groq rejected the API key. Check that GROQ_API_KEY is valid and current.";
+  }
+  if (status === 403) {
+    return "Groq denied access to this model or account. Check model access and billing.";
+  }
+  if (status === 429) {
+    return "Groq rate limit or usage quota reached. Check your Groq limits and try again later.";
+  }
+  return `Groq returned HTTP ${status}. Check the server logs for provider details.`;
 }
 
 function parseAnalysis(value: unknown): Analysis | null {
@@ -158,7 +189,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "The analysis input is too large." }, { status: 413 });
   }
 
-  const apiKey = process.env.GROQ_API_KEY;
+  const apiKey = process.env.GROQ_API_KEY?.trim();
   if (!apiKey) {
     return NextResponse.json(
       { error: "AI analysis is not configured. Add GROQ_API_KEY to the deployment environment." },
@@ -171,7 +202,23 @@ export async function POST(request: Request) {
   if (body.language !== undefined && body.language !== "en" && body.language !== "roman-urdu") {
     return NextResponse.json({ error: "Choose English or Roman Urdu for the analysis." }, { status: 400 });
   }
-  const model = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+  const configuredModel = process.env.GROQ_MODEL?.trim();
+  const model = !configuredModel || configuredModel === "llama-3.3-70b-versatile"
+    ? DEFAULT_GROQ_MODEL
+    : configuredModel;
+  if (configuredModel === "llama-3.3-70b-versatile") {
+    console.warn("Replacing the legacy default GROQ_MODEL with openai/gpt-oss-20b.");
+  }
+  const responseFormat = STRICT_JSON_SCHEMA_MODELS.has(model)
+    ? {
+        type: "json_schema",
+        json_schema: {
+          name: "scam_analysis",
+          strict: true,
+          schema: ANALYSIS_SCHEMA,
+        },
+      }
+    : { type: "json_object" };
   let response: Response;
 
   try {
@@ -184,15 +231,9 @@ export async function POST(request: Request) {
       body: JSON.stringify({
         model,
         temperature: 0.1,
-        max_tokens: 900,
-        response_format: {
-          type: "json_schema",
-          json_schema: {
-            name: "scam_analysis",
-            strict: true,
-            schema: ANALYSIS_SCHEMA,
-          },
-        },
+        max_completion_tokens: 900,
+        ...(model.startsWith("openai/gpt-oss-") ? { reasoning_effort: "low" } : {}),
+        response_format: responseFormat,
         messages: [
           {
             role: "system",
@@ -212,7 +253,14 @@ export async function POST(request: Request) {
       }),
       signal: AbortSignal.timeout(25_000),
     });
-  } catch {
+  } catch (error) {
+    console.error("Groq request failed before receiving a response.", {
+      model,
+      error: redactProviderDetails(
+        error instanceof Error ? error.message : "Unknown fetch error.",
+        apiKey,
+      ),
+    });
     return NextResponse.json(
       { error: "Could not reach the AI provider. Please try again shortly." },
       { status: 502 },
@@ -220,8 +268,15 @@ export async function POST(request: Request) {
   }
 
   if (!response.ok) {
+    const upstreamBody = await response.text();
+    console.error("Groq API returned a non-success status.", {
+      status: response.status,
+      statusText: response.statusText,
+      model,
+      responseBody: redactProviderDetails(upstreamBody, apiKey),
+    });
     return NextResponse.json(
-      { error: "The AI provider could not complete this analysis. Check the API key and quota." },
+      { error: getGroqErrorMessage(response.status) },
       { status: 502 },
     );
   }
